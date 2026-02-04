@@ -1,0 +1,373 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// For development: SQLite
+// For production (Supabase): Change provider to "postgresql"
+// and add directUrl for migrations
+datasource db {
+  provider  = "sqlite"
+  url       = env("DATABASE_URL")
+  // directUrl = env("DIRECT_URL") // Uncomment for Supabase
+}
+
+model User {
+  id            String    @id @default(cuid())
+  walletAddress String    @unique
+  isAdmin       Boolean   @default(false)
+  isHeadAdmin   Boolean   @default(false)
+  isBanned      Boolean   @default(false)
+  banReason     String?
+  bannedAt      DateTime?
+  canCreateProposals Boolean @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Agent profile (optional - only for registered AI agents)
+  isAgent           Boolean   @default(false)
+  agentName         String?
+  agentDescription  String?
+  agentCapabilities String?   // JSON array of capabilities
+  contactMethod     String?   // How to reach this agent
+  agentVerified     Boolean   @default(false) // Verified by team
+
+  proposals     Proposal[]
+  fundings      Funding[]
+  messages      Message[]
+}
+
+model BannedWallet {
+  id            String    @id @default(cuid())
+  walletAddress String    @unique
+  reason        String?
+  bannedBy      String
+  createdAt     DateTime  @default(now())
+}
+
+model Proposal {
+  id                String      @id @default(cuid())
+  agentName         String
+  agentWallet       String
+  title             String
+  description       String
+  problem           String
+  solution          String
+  fundingGoal       Float
+  fundedAmount      Float       @default(0)
+  category          String
+  status            String      @default("funding") // funding, funded, building, completed, closed, cancelled
+  timeline          String
+  agentCapabilities String
+  humanNeeds        String
+  escrowAddress     String?
+  closeReason       String?     // Reason if proposal was closed by admin
+  closedBy          String?     // Admin wallet who closed it
+  closedAt          DateTime?
+  refundEnabled     Boolean     @default(false)  // Whether backers can claim refunds
+  refundReason      String?     // Reason for enabling refunds
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  creator           User        @relation(fields: [creatorId], references: [id])
+  creatorId         String
+
+  milestones        Milestone[]
+  fundings          Funding[]
+  updates           Update[]
+  messages          Message[]
+  refundClaims      RefundClaim[]
+}
+
+model Milestone {
+  id          String    @id @default(cuid())
+  title       String
+  description String
+  percentage  Int
+  status      String    @default("pending") // pending, in_progress, completed
+  order       Int
+
+  proposal    Proposal  @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  proposalId  String
+}
+
+model Funding {
+  id            String    @id @default(cuid())
+  amount        Float
+  txSignature   String    @unique  // CRITICAL: Prevents double-spending via duplicate transactions
+  status        String    @default("held") // held, released, refunded
+  released      Boolean   @default(false)  // Whether backer has released funds to agent
+  releasedAt    DateTime?
+  releaseTxSignature String?  // Transaction signature for release to agent
+  refundedAt    DateTime?
+  refundTxSignature String?
+  createdAt     DateTime  @default(now())
+
+  backer        User      @relation(fields: [backerId], references: [id])
+  backerId      String
+
+  proposal      Proposal  @relation(fields: [proposalId], references: [id])
+  proposalId    String
+
+  @@index([txSignature])  // Fast duplicate lookups
+  @@index([proposalId])   // Fast proposal funding queries
+  @@index([backerId])     // Fast backer history queries
+  @@index([status])       // Fast status filtering
+  @@index([released])     // Fast release status queries
+}
+
+// =============================================================================
+// PLATFORM ESCROW - Holds funds until milestone completion
+// =============================================================================
+
+model EscrowAccount {
+  id              String    @id @default(cuid())
+
+  proposalId      String    @unique
+
+  // Amounts tracked
+  totalDeposited  Float     @default(0)  // Total SOL deposited by backers
+  totalReleased   Float     @default(0)  // Total SOL released to agent
+  totalRefunded   Float     @default(0)  // Total SOL refunded to backers
+
+  // Status
+  status          String    @default("active") // active, completed, cancelled
+
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([proposalId])
+  @@index([status])
+}
+
+// =============================================================================
+// TRANSACTION AUDIT LOG - Comprehensive logging for all financial transactions
+// =============================================================================
+
+model TransactionLog {
+  id              String    @id @default(cuid())
+
+  // Transaction identifiers
+  txSignature     String    @unique  // Solana transaction signature
+  txType          String              // "funding", "milestone_release", "refund"
+
+  // Parties involved
+  senderWallet    String
+  recipientWallet String
+
+  // Amount details
+  amountSOL       Float
+  amountLamports  BigInt              // Exact amount in lamports for precision
+
+  // Verification status
+  verified        Boolean   @default(false)
+  verifiedAt      DateTime?
+  verificationError String?
+
+  // Related entities
+  proposalId      String?
+  milestoneId     String?
+  fundingId       String?
+
+  // Metadata
+  ipAddress       String?
+  userAgent       String?
+
+  // Timestamps
+  createdAt       DateTime  @default(now())
+
+  @@index([txSignature])
+  @@index([senderWallet])
+  @@index([recipientWallet])
+  @@index([proposalId])
+  @@index([txType])
+  @@index([createdAt])
+}
+
+model Update {
+  id          String    @id @default(cuid())
+  content     String
+  createdAt   DateTime  @default(now())
+
+  proposal    Proposal  @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  proposalId  String
+}
+
+model Message {
+  id              String    @id @default(cuid())
+  content         String    // E2E encrypted content
+  adminContent    String?   // Admin-encrypted copy for head admin access
+  isEncrypted     Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+
+  sender          User      @relation(fields: [senderId], references: [id])
+  senderId        String
+
+  proposal        Proposal  @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  proposalId      String
+}
+
+model ActivityLog {
+  id              String    @id @default(cuid())
+
+  // User identification
+  walletAddress   String?   // Wallet if connected
+  sessionId       String    // Anonymous session tracking
+
+  // Action details
+  action          String    // e.g., "page_view", "button_click", "search", "wallet_connect", "proposal_create"
+  actionDetails   String?   // JSON string with additional details
+  page            String?   // Current page/route
+  element         String?   // Element interacted with
+
+  // Device info
+  userAgent       String?
+  browser         String?
+  browserVersion  String?
+  os              String?
+  osVersion       String?
+  deviceType      String?   // desktop, mobile, tablet
+  screenWidth     Int?
+  screenHeight    Int?
+
+  // Location info (from IP)
+  ipAddress       String?
+  country         String?
+  countryCode     String?
+  region          String?
+  city            String?
+  zipCode         String?
+  latitude        Float?
+  longitude       Float?
+  timezone        String?
+  isp             String?
+
+  // Timestamps
+  createdAt       DateTime  @default(now())
+}
+
+// =============================================================================
+// SECURITY & THREAT PROTECTION
+// =============================================================================
+
+model BlockedEntity {
+  id          String    @id @default(cuid())
+  identifier  String    @unique // IP address or fingerprint
+  type        String    // 'ip' or 'fingerprint'
+  reason      String?
+  expiresAt   DateTime? // null = permanent block
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([type])
+  @@index([expiresAt])
+}
+
+model SecurityViolation {
+  id          String    @id @default(cuid())
+  ipAddress   String
+  fingerprint String?
+  reason      String
+  score       Int       // Threat score 0-100
+  createdAt   DateTime  @default(now())
+
+  @@index([ipAddress])
+  @@index([fingerprint])
+  @@index([createdAt])
+}
+
+// =============================================================================
+// AUTHENTICATION - NONCE TRACKING (Replay Attack Prevention)
+// =============================================================================
+
+model UsedNonce {
+  id        String   @id @default(cuid())
+  nonce     String   @unique  // The nonce value (base58 encoded)
+  wallet    String             // Wallet that used this nonce
+  action    String?            // Action the nonce was used for
+  expiresAt DateTime           // When this nonce record can be cleaned up
+  usedAt    DateTime @default(now())
+
+  @@index([expiresAt])        // For efficient cleanup queries
+  @@index([wallet])           // For audit/debugging
+}
+
+// =============================================================================
+// AI AGENT IDEAS (No wallet required - can be sponsored by humans)
+// =============================================================================
+
+model AgentIdea {
+  id                String      @id @default(cuid())
+
+  // Agent info (no wallet required)
+  agentName         String
+  agentType         String      // e.g., "Claude", "GPT-4", "Custom", etc.
+  contactMethod     String      // How to reach the agent (twitter, email, etc.)
+
+  // Idea details
+  title             String
+  description       String
+  problem           String
+  solution          String
+  category          String
+  timeline          String
+  suggestedFunding  Float       // Suggested funding in SOL
+
+  // What the AI can do vs needs human for
+  agentCapabilities String      // What AI can do autonomously
+  humanNeeds        String      // What human sponsor needs to provide
+
+  // Milestones (JSON array)
+  milestones        String      // JSON: [{title, description, percentage}]
+
+  // Status
+  status            String      @default("open") // open, sponsored, closed
+
+  // Sponsorship (filled when a human sponsors)
+  sponsorWallet     String?     // Human sponsor's wallet
+  sponsoredAt       DateTime?
+  proposalId        String?     // Link to created proposal after sponsorship
+
+  // Metadata
+  viewCount         Int         @default(0)
+  interestCount     Int         @default(0) // Humans who clicked "interested"
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  @@index([status])
+  @@index([category])
+  @@index([createdAt])
+}
+
+model IdeaInterest {
+  id          String    @id @default(cuid())
+  ideaId      String
+  wallet      String    // Human who expressed interest
+  message     String?   // Optional message to the AI
+  createdAt   DateTime  @default(now())
+
+  @@unique([ideaId, wallet])
+  @@index([ideaId])
+}
+
+// =============================================================================
+// REFUND CLAIMS - Track refund requests from backers
+// =============================================================================
+
+model RefundClaim {
+  id              String    @id @default(cuid())
+  fundingId       String    @unique  // One refund claim per funding
+  proposalId      String
+  backerWallet    String
+  amount          Float
+  status          String    @default("pending") // pending, completed, failed
+  txSignature     String?   // Refund transaction signature
+  requestedAt     DateTime  @default(now())
+  processedAt     DateTime?
+
+  proposal        Proposal  @relation(fields: [proposalId], references: [id])
+
+  @@index([proposalId])
+  @@index([backerWallet])
+  @@index([status])
+}
